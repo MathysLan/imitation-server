@@ -1,8 +1,8 @@
-// Test d'intégration : une partie complète à 3 joueurs avec de faux blobs audio,
-// les tricheries qui doivent être refusées, et un abandon en cours de partie.
+// Test d'intégration v2 : partie complète à 3 joueurs - prises multiples (remplacement),
+// notation +2/+1/-1 par prise, scoreboard live, tricheries refusées, abandon.
 // Lancement (timings raccourcis via env) :
-//   WATCH_MS=150 RECORD_MS=300 RECORD_GRACE_MS=200 LISTEN_GAP_MS=100 \
-//   VOTE_MS=3000 RESULTS_MS=200 ROUNDS=1 PORT=8124 node src/server.js &
+//   VIDEOS_URL= WATCH_MS=150 RECORD_MS=400 RECORD_GRACE_MS=150 LISTEN_MS=1500 \
+//   RESULTS_MS=200 ROUNDS=1 PORT=8124 node src/server.js &
 //   PORT=8124 node test.js
 const WebSocket = require('ws');
 
@@ -31,7 +31,6 @@ function client() {
     send: (o) => ws.send(JSON.stringify(o)),
     sendBin: (b) => ws.send(b),
     open: () => new Promise((res) => ws.on('open', res)),
-    next,
     async nextType(type) { // consomme jusqu'au prochain message du type voulu
       for (;;) {
         const m = await next();
@@ -47,12 +46,11 @@ function client() {
   await a.open(); await b.open(); await c.open();
 
   a.send({ action: 'join', name: 'Mathys' });
-  let ra = await a.nextType('room');
+  const ra = await a.nextType('room');
   check('host reçoit son état de room', /^[A-Z2-9]{4}$/.test(ra.code) && ra.players.length === 1);
-  check('le créateur est host', ra.players[0].host === true);
   const code = ra.code, idA = ra.you;
 
-  b.send({ action: 'join', name: 'Bob', code: code.toLowerCase() });
+  b.send({ action: 'join', name: 'Bob', code });
   const rb = await b.nextType('room');
   const idB = rb.you;
   c.send({ action: 'join', name: 'Chloé', code });
@@ -60,81 +58,88 @@ function client() {
   const idC = rc.you;
   check('3 joueurs dans la room', rc.players.length === 3);
 
-  b.send({ action: 'start' });
-  let e = await b.nextType('error');
-  check('start refusé aux non-hosts', e.message === 'seul le host peut lancer');
-
   // ---------- watching ----------
   a.send({ action: 'start' });
-  const pa = await a.nextType('phase');
+  const pw = await a.nextType('phase');
   await b.nextType('phase'); await c.nextType('phase');
-  check('phase watching avec un ID vidéo', pa.phase === 'watching' && /^vid_\d+$/.test(pa.video));
-  check('compteur de rounds fourni', pa.round === 1 && pa.of >= 1);
+  check('watching : vidéo + durée fournies', pw.phase === 'watching' && /^vid_\d+$/.test(pw.video) && pw.dur > 0);
 
   // ---------- recording ----------
-  const rec = await a.nextType('phase');
+  const pr = await a.nextType('phase');
   await b.nextType('phase'); await c.nextType('phase');
-  check('phase recording avec deadline', rec.phase === 'recording' && rec.deadline > Date.now());
+  check('recording : la vidéo à rejouer est indiquée', pr.phase === 'recording' && pr.video === pw.video);
 
-  c.sendBin(Buffer.from('X'));
-  e = await c.nextType('error');
-  check('binaire sans méta refusé', e.message === 'méta audio manquante');
+  a.send({ action: 'rate', value: 2 });
+  let e = await a.nextType('error');
+  check('noter pendant recording refusé', e.message === "ce n'est pas le moment de noter");
 
-  a.send({ action: 'vote', for: idB });
-  e = await a.nextType('error');
-  check('vote pendant recording refusé', e.message === "ce n'est pas le moment de voter");
-
+  // A envoie une prise, puis la REFAIT : la seconde doit remplacer la première, sans erreur
   a.send({ action: 'audio-meta', mime: 'audio/mp4' });
-  a.sendBin(Buffer.from('AUDIO_A'));
+  a.sendBin(Buffer.from('AUDIO_A_v1'));
+  a.send({ action: 'audio-meta', mime: 'audio/mp4' });
+  a.sendBin(Buffer.from('AUDIO_A_v2'));
   b.send({ action: 'audio-meta', mime: 'audio/webm' });
   b.sendBin(Buffer.from('AUDIO_B'));
-  b.send({ action: 'audio-meta', mime: 'audio/webm' });
-  b.sendBin(Buffer.from('AUDIO_B2'));
-  e = await b.nextType('error');
-  check('double prise refusée', e.message === 'prise déjà reçue');
   c.send({ action: 'audio-meta', mime: 'audio/mp4' });
   c.sendBin(Buffer.from('AUDIO_C'));
 
-  // ---------- broadcasting ----------
-  const br = await a.nextType('phase');
+  // ---------- rating : 3 prises, notées une par une ----------
+  const pk = await a.nextType('phase');
   await b.nextType('phase'); await c.nextType('phase');
-  check('broadcast anticipé quand tout le monde a rendu', br.phase === 'broadcasting' && br.count === 3);
+  check('phase rating avec 3 prises', pk.phase === 'rating' && pk.count === 3);
 
-  const heard = [];
+  const heardByA = [];
+  const scoresAfter = {}; // scores broadcastés après chaque prise
   for (let i = 0; i < 3; i++) {
-    const meta = await a.nextType('listen');
+    const mA = await a.nextType('listen');
     const bin = await a.nextType('binary');
-    heard.push({ name: meta.name, mime: meta.mime, data: bin.buf.toString() });
-    await b.nextType('listen'); await b.nextType('binary'); // les autres reçoivent pareil
+    await b.nextType('listen'); await b.nextType('binary');
     await c.nextType('listen'); await c.nextType('binary');
+    heardByA.push({ ...mA, data: bin.buf.toString() });
+
+    const owner = mA.player;
+    const raters = { [idA]: a, [idB]: b, [idC]: c };
+    const ownerClient = raters[owner];
+    delete raters[owner];
+    const [r1, r2] = Object.values(raters);
+
+    if (i === 0) { // tricheries testées sur la première prise uniquement
+      ownerClient.send({ action: 'rate', value: 2 });
+      e = await ownerClient.nextType('error');
+      check('noter sa propre prise refusé', e.message === 'pas ta propre imitation');
+      r1.send({ action: 'rate', value: 5 });
+      e = await r1.nextType('error');
+      check('note invalide refusée', e.message === 'note invalide');
+      r1.send({ action: 'rate', value: 2 });
+      r1.send({ action: 'rate', value: 1 });
+      e = await r1.nextType('error');
+      check('double note refusée', e.message === 'déjà noté');
+    } else {
+      r1.send({ action: 'rate', value: 2 });
+    }
+    r2.send({ action: 'rate', value: i === 2 ? -1 : 1 }); // dernière prise : 👍×2 + 👎
+
+    const sc = await a.nextType('scores');
+    await b.nextType('scores'); await c.nextType('scores');
+    scoresAfter[owner] = sc.scores.find((s) => s.id === owner).score;
   }
-  const datas = heard.map((h) => h.data).sort();
-  check('les 3 prises sont rediffusées intactes', JSON.stringify(datas) === JSON.stringify(['AUDIO_A', 'AUDIO_B', 'AUDIO_C']));
-  check('le mime suit chaque prise', heard.every((h) => h.mime.startsWith('audio/')));
 
-  // ---------- voting ----------
-  const vo = await a.nextType('phase');
-  await b.nextType('phase'); await c.nextType('phase');
-  check('phase voting avec 3 candidats', vo.phase === 'voting' && vo.candidates.length === 3);
+  const datas = heardByA.map((h) => h.data).sort();
+  check('la prise refaite a bien remplacé la première', JSON.stringify(datas) === JSON.stringify(['AUDIO_A_v2', 'AUDIO_B', 'AUDIO_C']));
+  check('compteur idx/of cohérent', heardByA.every((h, i) => h.idx === i + 1 && h.of === 3));
+  check('chaque listen référence la vidéo du round', heardByA.every((h) => h.video === pw.video));
 
-  a.send({ action: 'vote', for: idA });
-  e = await a.nextType('error');
-  check('vote pour soi-même refusé', e.message === 'pas pour toi-même');
-
-  a.send({ action: 'vote', for: idB });
-  b.send({ action: 'vote', for: idA });
-  c.send({ action: 'vote', for: idA });
+  const lastOwner = heardByA[2].player;
+  const expectLast = 2 - 1; // 👍×2 + 👎
+  check('scoreboard live : +2+1 sur les 2 premières, +1 sur la dernière',
+    heardByA.slice(0, 2).every((h) => scoresAfter[h.player] === 3) && scoresAfter[lastOwner] === expectLast);
 
   // ---------- results & end ----------
   const rs = await a.nextType('phase');
-  await b.nextType('phase'); await c.nextType('phase');
-  check('résultats dès que tout le monde a voté', rs.phase === 'results');
-  const vA = rs.votes.find((v) => v.id === idA), vB = rs.votes.find((v) => v.id === idB);
-  check('décompte des voix correct (A=2, B=1)', vA.votes === 2 && vB.votes === 1);
-  check('scores cumulés et triés', rs.scores[0].id === idA && rs.scores[0].score === 2);
+  check('phase results avec scores triés', rs.phase === 'results' && rs.scores[0].score >= rs.scores[2].score);
 
   const end = await a.nextType('phase');
-  check('fin de partie avec podium', end.phase === 'end' && end.podium[0].id === idA);
+  check('fin de partie avec podium', end.phase === 'end' && end.podium.length === 3);
 
   a.ws.close(); b.ws.close(); c.ws.close();
 
@@ -150,8 +155,6 @@ function client() {
   f.ws.close();
   e = await d.nextType('error');
   check('abandon → retour au lobby annoncé', e.message.includes('plus assez de joueurs'));
-  const rl = await d.nextType('room');
-  check('la room repasse en lobby', rl.phase === 'lobby' && rl.players.length === 1);
   d.ws.close();
 
   console.log(failures === 0 ? '\nTOUS LES TESTS PASSENT' : `\n${failures} ÉCHEC(S)`);

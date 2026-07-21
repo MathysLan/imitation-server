@@ -16,21 +16,23 @@ function shuffle(arr) {
   return a;
 }
 
-function validateVote(phase, candidates, votes, voterId, forId) {
-  if (phase !== 'voting') return fail("ce n'est pas le moment de voter");
-  if (votes.has(voterId)) return fail('tu as déjà voté');
-  if (forId === voterId) return fail('pas pour toi-même');
-  if (!candidates.includes(forId)) return fail('candidat inconnu');
+// Notation d'une imitation : 👍×2 (+2), 👍 (+1), 👎 (-1). Une note par joueur et par prise.
+function validateRate(phase, current, raterId, value) {
+  if (phase !== 'rating') return fail("ce n'est pas le moment de noter");
+  if (!current) return fail('aucune imitation en cours');
+  if (raterId === current.owner) return fail('pas ta propre imitation');
+  if (current.ratings.has(raterId)) return fail('déjà noté');
+  if (![2, 1, -1].includes(value)) return fail('note invalide');
   return { ok: true };
 }
 
-// votes : Map(votant → candidat) → Map(candidat → nombre de voix)
-function tally(votes) {
-  const counts = new Map();
-  for (const forId of votes.values()) counts.set(forId, (counts.get(forId) || 0) + 1);
-  return counts;
+// ratings : Map(noteur → valeur) → total du round pour cette prise
+function sumRatings(ratings) {
+  let total = 0;
+  for (const v of ratings.values()) total += v;
+  return total;
 }
 
 const fail = (error) => ({ ok: false, error });
 
-module.exports = { pickVideo, shuffle, validateVote, tally };
+module.exports = { pickVideo, shuffle, validateRate, sumRatings };
