@@ -7,13 +7,17 @@ Machine à états pilotée serveur, audios relayés en RAM et purgés à chaque 
 lobby → watching → recording → rating (écoute + notation, prise par prise) → results → (round suivant | end)
 ```
 
-v2 :
-- la vidéo tourne pendant l'enregistrement : la fenêtre suit la durée du clip
-- prises refaisables (la dernière reçue remplace la précédente)
-- notation par imitation : 👍×2 (+2), 👍 (+1), 👎 (-1), une note par joueur et par prise
+v3 :
+- **plus aucun timer de gameplay : le host pilote** avec l'action `next`
+  (visionnage → enregistrement → clôture → passer une imitation → round suivant)
+- prises refaisables (la dernière reçue remplace la précédente) ; à la clôture,
+  un `hurry` est diffusé et une grâce d'upload laisse arriver les dernières frames
+- notation par imitation : 👍×2 (+2), 👍 (+1), 👎 (-1) - avance seule quand tout
+  le monde a noté, ou sur `next` du host
 - scoreboard diffusé après chaque prise notée
 - **catalogue vidéos chargé depuis GitHub Pages** (`videos.json`, rechargé toutes
-  les 10 min) : ajouter un clip ne demande aucun redéploiement du serveur
+  les 10 min) : entrées `{ "id": "vid_01" }`, champ `url` optionnel pour un
+  hébergement externe - plus besoin de durée
 
 ## Lancer en local
 
@@ -25,8 +29,7 @@ npm start          # port 8080 (ou $PORT)
 ## Tests
 
 ```bash
-VIDEOS_URL= WATCH_MS=150 RECORD_MS=400 RECORD_GRACE_MS=150 LISTEN_MS=1500 \
-RESULTS_MS=200 ROUNDS=1 PORT=8124 node src/server.js &
+VIDEOS_URL= RECORD_GRACE_MS=200 ROUNDS=1 PORT=8124 node src/server.js &
 PORT=8124 node test.js
 ```
 
@@ -35,13 +38,7 @@ PORT=8124 node test.js
 | Var               | Défaut  | Rôle                                              |
 |-------------------|---------|---------------------------------------------------|
 | `VIDEOS_URL`      | videos.json du site | catalogue distant ('' = liste locale) |
-| `WATCH_MS`        | durée du clip | fenêtre de visionnage                       |
-| `RECORD_MS`       | clip + extra  | fenêtre d'enregistrement (0 = auto)         |
-| `RECORD_EXTRA_MS` | 2000    | marge pour appuyer sur ⏺                          |
-| `RECORD_GRACE_MS` | 3000    | marge d'upload avant de trancher                  |
-| `LISTEN_MS`       | rec + gap | fenêtre d'écoute/notation par prise (0 = auto)  |
-| `LISTEN_GAP_MS`   | 2000    | respiration entre deux écoutes                    |
-| `RESULTS_MS`      | 8000    | affichage des résultats                           |
+| `RECORD_GRACE_MS` | 2500    | grâce d'upload après la clôture du host           |
 | `ROUNDS`          | 3       | rounds par partie                                 |
 
 ## Protocole
@@ -53,11 +50,13 @@ Texte (JSON) + frames binaires (les prises audio) sur le même socket :
 | client  | `{ action:'join', name }` — crée la room (host) |
 | client  | `{ action:'join', name, code }` — rejoint |
 | client  | `{ action:'start' }` — host, depuis le lobby |
+| client  | `{ action:'next' }` — host : phase suivante / clôture / skip |
 | client  | `{ action:'audio-meta', mime, size }` puis **une frame binaire** (refaisable) |
 | client  | `{ action:'rate', value }` — 2, 1 ou -1 sur la prise en cours |
 | serveur | `{ type:'room', code, phase, you, players[] }` |
-| serveur | `{ type:'phase', phase, deadline, … }` |
-| serveur | `{ type:'listen', idx, of, player, name, mime, video, deadline }` puis **une frame binaire** |
+| serveur | `{ type:'phase', phase, … }` |
+| serveur | `{ type:'hurry' }` — clôture de l'enregistrement : stoppe et envoie |
+| serveur | `{ type:'listen', idx, of, player, name, mime }` puis **une frame binaire** |
 | serveur | `{ type:'scores', scores }` — scoreboard live après chaque prise |
 | serveur | `{ type:'error', message }` |
 

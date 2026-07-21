@@ -1,24 +1,23 @@
 // Serveur arbitre du jeu d'imitation. Node + ws, rien d'autre.
 // Machine à états pilotée serveur :
 //   lobby → watching → recording → rating (écoute + notation, prise par prise) → results → (round suivant | end)
-// Le client ne décide de rien : il reçoit des ordres de phase et obéit.
 //
-// v2 :
-// - la vidéo tourne pendant l'enregistrement : la durée d'enregistrement suit la durée du clip
-// - plusieurs prises autorisées pendant la fenêtre (la dernière reçue remplace la précédente)
-// - notation par imitation pendant l'écoute : +2 / +1 / -1, une note par joueur et par prise
-// - scoreboard diffusé après chaque prise notée
-// - catalogue vidéos rechargé depuis GitHub Pages (videos.json) : ajouter un clip
-//   ne demande AUCUN redéploiement du serveur
+// v3 : PLUS AUCUN timer de gameplay. C'est le host qui fait avancer la partie
+// avec l'action 'next' (visionnage → enregistrement → fin d'enregistrement →
+// passer une imitation → round suivant). Une seule temporisation subsiste :
+// la grâce d'upload quand le host clôt l'enregistrement, pour laisser les
+// dernières prises arriver.
 //
 // Protocole texte (JSON) + frames binaires (les prises audio) :
 //   client  → { action:'join', name, code? }        sans code : crée la room (host)
 //   client  → { action:'start' }                    host uniquement, depuis le lobby
-//   client  → { action:'audio-meta', mime, size }   puis UNE frame binaire juste derrière
-//   client  → { action:'rate', value }              2, 1 ou -1 sur la prise en cours d'écoute
+//   client  → { action:'next' }                     host uniquement : phase suivante
+//   client  → { action:'audio-meta', mime, size }   puis UNE frame binaire (refaisable)
+//   client  → { action:'rate', value }              2, 1 ou -1 sur la prise en cours
 //   serveur → { type:'room', ... }                  état du lobby (joueurs, scores, host)
-//   serveur → { type:'phase', phase, ... }          changement d'état, avec deadline
-//   serveur → { type:'listen', idx, of, player, name, mime, video, deadline } puis UNE frame binaire
+//   serveur → { type:'phase', phase, ... }          changement d'état
+//   serveur → { type:'hurry' }                      le host clôt l'enregistrement : stoppe et envoie
+//   serveur → { type:'listen', idx, of, player, name, mime } puis UNE frame binaire
 //   serveur → { type:'scores', scores }             scoreboard live, après chaque prise notée
 //   serveur → { type:'error', message }
 
@@ -26,15 +25,8 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const engine = require('./engine');
 
-// Durées surchargeables par variables d'env : indispensable pour les tests d'intégration.
 const CONFIG = {
-  WATCH_MS: +process.env.WATCH_MS || 0,                  // 0 = durée réelle du clip
-  RECORD_MS: +process.env.RECORD_MS || 0,                // 0 = durée du clip + RECORD_EXTRA_MS
-  RECORD_EXTRA_MS: +process.env.RECORD_EXTRA_MS || 2000, // marge pour appuyer sur ⏺
-  RECORD_GRACE_MS: +process.env.RECORD_GRACE_MS || 3000, // marge d'upload avant de trancher
-  LISTEN_MS: +process.env.LISTEN_MS || 0,                // 0 = durée d'enregistrement + LISTEN_GAP_MS
-  LISTEN_GAP_MS: +process.env.LISTEN_GAP_MS || 2000,
-  RESULTS_MS: +process.env.RESULTS_MS || 8000,
+  RECORD_GRACE_MS: +process.env.RECORD_GRACE_MS || 2500, // grâce d'upload après le 'next' du host
   ROUNDS: +process.env.ROUNDS || 3,
   MIN_PLAYERS: 2,
   MAX_PLAYERS: 8,
@@ -42,7 +34,8 @@ const CONFIG = {
 };
 
 // --- catalogue vidéos : UNE source de vérité, dans le repo du site -----------
-// Ajouter un clip = déposer le .mp4 + une ligne dans videos.json côté GitHub Pages.
+// Chaque entrée : { id } et, en option, { url } pour un hébergement externe
+// (R2, autre domaine…). Sans url, le front prend videos/<id>.mp4 sur le site.
 // Le serveur recharge la liste au boot puis toutes les 10 minutes.
 let VIDEOS = require('./videos'); // liste de secours embarquée
 const VIDEOS_URL = process.env.VIDEOS_URL !== undefined
@@ -54,8 +47,8 @@ async function refreshVideos() {
   try {
     const res = await fetch(VIDEOS_URL, { cache: 'no-store' });
     const list = await res.json();
-    if (Array.isArray(list) && list.length && list.every((v) => v.id && +v.dur > 0)) {
-      VIDEOS = list.map((v) => ({ id: String(v.id), dur: +v.dur }));
+    if (Array.isArray(list) && list.length && list.every((v) => v.id)) {
+      VIDEOS = list.map((v) => ({ id: String(v.id), url: v.url ? String(v.url) : null }));
       console.log(`catalogue vidéos rechargé : ${VIDEOS.length} clip(s)`);
     }
   } catch { /* réseau ou JSON cassé : on garde la dernière liste valide */ }
@@ -91,13 +84,13 @@ function createRoom(code) {
     hostId: null,
     round: 0,
     usedVideos: [],
-    videoId: null,
-    recMs: 0,
+    video: null,        // { id, url } du round en cours
+    closing: false,     // grâce d'upload en cours après le 'next' du host
     takes: new Map(),   // id → { buf, mime } - RAM le temps du round, purgé après
     queue: [],          // prises à diffuser
     listenIdx: 0,
     current: null,      // { owner, ratings: Map(noteur → valeur) }
-    timer: null,
+    timer: null,        // uniquement la grâce d'upload
   };
 }
 
@@ -111,6 +104,7 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(raw); } catch { return sendError(ws, 'JSON invalide'); }
     if (msg.action === 'join') onJoin(ws, msg);
     else if (msg.action === 'start') onStart(ws);
+    else if (msg.action === 'next') onNext(ws);
     else if (msg.action === 'audio-meta') onAudioMeta(ws, msg);
     else if (msg.action === 'rate') onRate(ws, msg.value);
     else sendError(ws, 'action inconnue');
@@ -155,6 +149,19 @@ function onStart(ws) {
   nextRound(room);
 }
 
+// Le host pilote : chaque 'next' fait avancer la phase en cours.
+function onNext(ws) {
+  const room = rooms.get(ws.room);
+  if (!room) return sendError(ws, 'aucune room');
+  if (ws.id !== room.hostId) return sendError(ws, 'seul le host peut passer');
+
+  if (room.phase === 'watching') startRecording(room);
+  else if (room.phase === 'recording') endRecording(room);
+  else if (room.phase === 'rating') closeTake(room);       // passe l'imitation en cours
+  else if (room.phase === 'results') nextRound(room);
+  else sendError(ws, 'rien à passer ici');
+}
+
 // ---------------------------------------------------------------- machine à états
 
 function nextRound(room) {
@@ -164,25 +171,28 @@ function nextRound(room) {
 
   const video = engine.pickVideo(VIDEOS, room.usedVideos);
   room.usedVideos.push(video.id);
-  room.videoId = video.id;
-  room.recMs = CONFIG.RECORD_MS || video.dur * 1000 + CONFIG.RECORD_EXTRA_MS;
+  room.video = video;
 
   room.phase = 'watching';
-  const ms = CONFIG.WATCH_MS || video.dur * 1000;
-  phase(room, {
-    phase: 'watching', round: room.round, of: CONFIG.ROUNDS,
-    video: video.id, dur: video.dur, deadline: Date.now() + ms,
-  });
-  setPhaseTimer(room, ms, () => startRecording(room));
+  phase(room, { phase: 'watching', round: room.round, of: CONFIG.ROUNDS, video: video.id, url: video.url || null });
 }
 
 function startRecording(room) {
   room.phase = 'recording';
-  phase(room, {
-    phase: 'recording', video: room.videoId, deadline: Date.now() + room.recMs,
+  room.closing = false;
+  phase(room, { phase: 'recording', video: room.video.id, url: room.video.url || null });
+}
+
+// Le host clôt l'enregistrement : on prévient tout le monde (les prises en cours
+// se stoppent et s'envoient), puis la grâce d'upload laisse arriver les frames.
+function endRecording(room) {
+  if (room.closing) return;
+  room.closing = true;
+  roomBroadcast(room, { type: 'hurry' });
+  setGraceTimer(room, CONFIG.RECORD_GRACE_MS, () => {
+    room.closing = false;
+    startRating(room);
   });
-  // Pas d'avance anticipée ici : la fenêtre sert à REFAIRE des prises, on la laisse entière.
-  setPhaseTimer(room, room.recMs + CONFIG.RECORD_GRACE_MS, () => startRating(room));
 }
 
 function startRating(room) {
@@ -202,21 +212,18 @@ function playTake(room) {
   room.listenIdx++;
   room.current = { owner, ratings: new Map() };
 
-  const listenMs = CONFIG.LISTEN_MS || room.recMs + CONFIG.LISTEN_GAP_MS;
   const author = room.players.get(owner);
   for (const p of room.players.values()) {
     sendJson(p.ws, {
       type: 'listen', idx: room.listenIdx, of: room.listenIdx + room.queue.length,
       player: owner, name: author ? author.name : '?', mime: take.mime,
-      video: room.videoId, deadline: Date.now() + listenMs,
     });
     p.ws.send(take.buf); // la frame binaire, telle que reçue
   }
-  setPhaseTimer(room, listenMs, () => closeTake(room));
+  // Pas de timer : la prise avance quand tout le monde a noté, ou sur 'next' du host.
 }
 
 function closeTake(room) {
-  clearTimeout(room.timer);
   const cur = room.current;
   if (cur) {
     const p = room.players.get(cur.owner);
@@ -229,9 +236,9 @@ function closeTake(room) {
 
 function showResults(room) {
   room.phase = 'results';
-  phase(room, { phase: 'results', scores: scoreboard(room), deadline: Date.now() + CONFIG.RESULTS_MS });
+  phase(room, { phase: 'results', scores: scoreboard(room) });
   purge(room); // ← purge absolue : les audios du round meurent ici, la RAM revient à plat
-  setPhaseTimer(room, CONFIG.RESULTS_MS, () => nextRound(room));
+  // Le host enchaîne avec 'next' quand il veut.
 }
 
 function endGame(room) {
@@ -283,7 +290,7 @@ function onLeave(ws) {
   room.takes.delete(ws.id);
   if (room.current) room.current.ratings.delete(ws.id);
 
-  if (room.players.size === 0) { // room vide : tout disparaît, timers compris
+  if (room.players.size === 0) { // room vide : tout disparaît, timer compris
     clearTimeout(room.timer);
     rooms.delete(room.code);
     return;
@@ -296,7 +303,7 @@ function onLeave(ws) {
     room.phase = 'lobby';
     roomBroadcast(room, { type: 'error', message: 'plus assez de joueurs - retour au lobby' });
   }
-  sendRoomState(room);
+  sendRoomState(room); // met aussi à jour le badge host chez tout le monde
 
   if (room.phase === 'rating' && ratingsComplete(room)) closeTake(room);
 }
@@ -308,6 +315,7 @@ function purge(room) {
   room.queue = [];
   room.current = null;
   room.listenIdx = 0;
+  room.closing = false;
 }
 
 function scoreboard(room) {
@@ -316,7 +324,7 @@ function scoreboard(room) {
     .sort((a, b) => b.score - a.score);
 }
 
-function setPhaseTimer(room, ms, fn) {
+function setGraceTimer(room, ms, fn) {
   clearTimeout(room.timer);
   room.timer = setTimeout(fn, ms);
 }
