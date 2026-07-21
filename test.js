@@ -47,7 +47,7 @@ function client() {
   const a = client(), b = client(), c = client();
   await a.open(); await b.open(); await c.open();
 
-  a.send({ action: 'join', name: 'Mathys' });
+  a.send({ action: 'join', name: 'Mathys', avatar: '🔥' });
   const ra = await a.nextType('room');
   const code = ra.code, idA = ra.you;
   b.send({ action: 'join', name: 'Bob', code });
@@ -57,16 +57,26 @@ function client() {
   const rc = await c.nextType('room');
   const idC = rc.you;
   check('3 joueurs dans la room', rc.players.length === 3);
+  check('avatar transmis dans la room', rc.players.find((p) => p.id === idA).avatar === '🔥');
+
+  // draine les états de room hérités des joins de B et C avant de tester « prêt »
+  await a.nextType('room'); await a.nextType('room'); await b.nextType('room');
+
+  b.send({ action: 'ready', ready: true });
+  const rr = await a.nextType('room');
+  await b.nextType('room'); await c.nextType('room');
+  check('« prêt » visible par tout le monde', rr.players.find((p) => p.id === idB).ready === true);
 
   b.send({ action: 'next' });
   let e = await b.nextType('error');
   check("'next' refusé aux non-hosts", e.message === 'seul le host peut passer');
 
   // ---------- watching : n'avance QUE sur ordre du host ----------
-  a.send({ action: 'start' });
+  a.send({ action: 'start', rounds: 1 });
   const pw = await a.nextType('phase');
   await b.nextType('phase'); await c.nextType('phase');
   check('watching : vidéo fournie (id, url optionnelle)', pw.phase === 'watching' && /^vid_\d+$/.test(pw.video) && 'url' in pw);
+  check('nombre de manches choisi par le host respecté', pw.of === 1);
 
   await sleep(400);
   check('pas d\'avance automatique sans le host', a.queue.length === 0);

@@ -82,6 +82,7 @@ function createRoom(code) {
     phase: 'lobby',
     players: new Map(), // id → { id, name, ws, score }
     hostId: null,
+    rounds: null,       // manches choisies par le host au lancement
     round: 0,
     usedVideos: [],
     video: null,        // { id, url } du round en cours
@@ -103,7 +104,8 @@ wss.on('connection', (ws) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return sendError(ws, 'JSON invalide'); }
     if (msg.action === 'join') onJoin(ws, msg);
-    else if (msg.action === 'start') onStart(ws);
+    else if (msg.action === 'ready') onReady(ws, msg.ready);
+    else if (msg.action === 'start') onStart(ws, msg);
     else if (msg.action === 'next') onNext(ws);
     else if (msg.action === 'audio-meta') onAudioMeta(ws, msg);
     else if (msg.action === 'rate') onRate(ws, msg.value);
@@ -114,7 +116,7 @@ wss.on('connection', (ws) => {
 
 // ---------------------------------------------------------------- lobby
 
-function onJoin(ws, { name, code }) {
+function onJoin(ws, { name, code, avatar }) {
   if (ws.room) return sendError(ws, 'déjà dans une room');
   const cleanName = String(name || '').trim().slice(0, 16);
   if (!cleanName) return sendError(ws, 'il faut un pseudo');
@@ -132,18 +134,35 @@ function onJoin(ws, { name, code }) {
   }
 
   ws.room = room.code;
-  room.players.set(ws.id, { id: ws.id, name: cleanName, ws, score: 0 });
+  room.players.set(ws.id, {
+    id: ws.id,
+    name: cleanName,
+    avatar: String(avatar || '🙂').slice(0, 4), // un emoji suffit comme photo de profil
+    ready: false,
+    ws,
+    score: 0,
+  });
   sendRoomState(room);
 }
 
-function onStart(ws) {
+// « Prêt » : purement déclaratif, affiché à tous. Le host reste seul maître du départ.
+function onReady(ws, ready) {
+  const room = rooms.get(ws.room);
+  if (!room) return sendError(ws, 'aucune room');
+  const p = room.players.get(ws.id);
+  if (p) { p.ready = !!ready; sendRoomState(room); }
+}
+
+function onStart(ws, msg) {
   const room = rooms.get(ws.room);
   if (!room) return sendError(ws, 'aucune room');
   if (ws.id !== room.hostId) return sendError(ws, 'seul le host peut lancer');
   if (room.phase !== 'lobby') return sendError(ws, 'partie déjà lancée');
   if (room.players.size < CONFIG.MIN_PLAYERS) return sendError(ws, `il faut au moins ${CONFIG.MIN_PLAYERS} joueurs`);
 
-  for (const p of room.players.values()) p.score = 0;
+  // Config choisie par le host à l'écran de lancement (bornée côté serveur, évidemment).
+  room.rounds = Math.min(10, Math.max(1, Math.trunc(+((msg && msg.rounds)) || CONFIG.ROUNDS)));
+  for (const p of room.players.values()) { p.score = 0; p.ready = false; }
   room.round = 0;
   room.usedVideos = [];
   nextRound(room);
@@ -166,7 +185,7 @@ function onNext(ws) {
 
 function nextRound(room) {
   purge(room);
-  if (room.round >= CONFIG.ROUNDS) return endGame(room);
+  if (room.round >= (room.rounds || CONFIG.ROUNDS)) return endGame(room);
   room.round++;
 
   const video = engine.pickVideo(VIDEOS, room.usedVideos);
@@ -174,7 +193,7 @@ function nextRound(room) {
   room.video = video;
 
   room.phase = 'watching';
-  phase(room, { phase: 'watching', round: room.round, of: CONFIG.ROUNDS, video: video.id, url: video.url || null });
+  phase(room, { phase: 'watching', round: room.round, of: room.rounds || CONFIG.ROUNDS, video: video.id, url: video.url || null });
 }
 
 function startRecording(room) {
@@ -216,7 +235,8 @@ function playTake(room) {
   for (const p of room.players.values()) {
     sendJson(p.ws, {
       type: 'listen', idx: room.listenIdx, of: room.listenIdx + room.queue.length,
-      player: owner, name: author ? author.name : '?', mime: take.mime,
+      player: owner, name: author ? author.name : '?', avatar: author ? author.avatar : '🙂',
+      mime: take.mime,
     });
     p.ws.send(take.buf); // la frame binaire, telle que reçue
   }
@@ -320,7 +340,7 @@ function purge(room) {
 
 function scoreboard(room) {
   return [...room.players.values()]
-    .map((p) => ({ id: p.id, name: p.name, score: p.score }))
+    .map((p) => ({ id: p.id, name: p.name, avatar: p.avatar, score: p.score }))
     .sort((a, b) => b.score - a.score);
 }
 
@@ -335,7 +355,7 @@ function phase(room, payload) {
 
 function sendRoomState(room) {
   const players = [...room.players.values()]
-    .map((p) => ({ id: p.id, name: p.name, score: p.score, host: p.id === room.hostId }));
+    .map((p) => ({ id: p.id, name: p.name, avatar: p.avatar, ready: p.ready, score: p.score, host: p.id === room.hostId }));
   for (const p of room.players.values()) {
     sendJson(p.ws, { type: 'room', code: room.code, phase: room.phase, you: p.id, players });
   }
