@@ -199,7 +199,10 @@ function nextRound(room) {
 function startRecording(room) {
   room.phase = 'recording';
   room.closing = false;
+  // « prêt » repart à zéro : pendant l'enregistrement il signifie « j'ai fini ma prise »
+  for (const p of room.players.values()) p.ready = false;
   phase(room, { phase: 'recording', video: room.video.id, url: room.video.url || null });
+  sendRoomState(room);
 }
 
 // Le host clôt l'enregistrement : on prévient tout le monde (les prises en cours
@@ -286,19 +289,17 @@ function onAudio(ws, buf) {
 
 // ---------------------------------------------------------------- notation
 
+// La note n'interrompt rien : l'imitation joue jusqu'au bout, chacun peut la
+// réécouter, et c'est le host qui passe à la suivante ('next'). On diffuse juste
+// l'avancement des votes pour que tout le monde (surtout le host) le voie.
 function onRate(ws, value) {
   const room = rooms.get(ws.room);
   if (!room) return sendError(ws, 'aucune partie en cours');
   const res = engine.validateRate(room.phase, room.current, ws.id, value);
   if (!res.ok) return sendError(ws, res.error);
   room.current.ratings.set(ws.id, value);
-  if (ratingsComplete(room)) closeTake(room); // tout le monde a noté : prise suivante
-}
-
-function ratingsComplete(room) {
-  if (!room.current) return false;
   const eligible = room.players.size - (room.players.has(room.current.owner) ? 1 : 0);
-  return eligible > 0 && room.current.ratings.size >= eligible;
+  roomBroadcast(room, { type: 'rated', count: room.current.ratings.size, of: eligible });
 }
 
 // ---------------------------------------------------------------- départs
@@ -324,8 +325,6 @@ function onLeave(ws) {
     roomBroadcast(room, { type: 'error', message: 'plus assez de joueurs - retour au lobby' });
   }
   sendRoomState(room); // met aussi à jour le badge host chez tout le monde
-
-  if (room.phase === 'rating' && ratingsComplete(room)) closeTake(room);
 }
 
 // ---------------------------------------------------------------- helpers

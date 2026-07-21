@@ -85,6 +85,9 @@ function client() {
   const pr = await a.nextType('phase');
   await b.nextType('phase'); await c.nextType('phase');
   check('next → recording', pr.phase === 'recording' && pr.video === pw.video);
+  const rrec = await a.nextType('room');
+  await b.nextType('room'); await c.nextType('room');
+  check('« prêt » remis à zéro en phase recording', rrec.players.every((p) => p.ready === false));
 
   // ---------- recording : prises (avec remplacement), clôture par le host ----------
   a.send({ action: 'audio-meta', mime: 'audio/mp4' });
@@ -107,7 +110,7 @@ function client() {
   await b.nextType('phase'); await c.nextType('phase');
   check('rating avec 3 prises (celle de la grâce comprise)', pk.phase === 'rating' && pk.count === 3);
 
-  // ---------- rating : notes, et skip du host sur une prise ----------
+  // ---------- rating : les notes ne coupent rien, SEUL le host fait avancer ----------
   const heard = [];
   for (let i = 0; i < 3; i++) {
     const mA = await a.nextType('listen');
@@ -121,14 +124,23 @@ function client() {
     const raters = Object.entries(clients).filter(([id]) => id !== owner).map(([, cl]) => cl);
 
     if (i === 1) {
-      // une seule note (+2), puis le host passe : le point doit compter quand même
-      raters[0].send({ action: 'rate', value: 2 });
-      await sleep(150);
-      a.send({ action: 'next' });
+      raters[0].send({ action: 'rate', value: 2 }); // note partielle : le host passera quand même
+      const rd = await a.nextType('rated');
+      await b.nextType('rated'); await c.nextType('rated');
+      check('avancement des votes diffusé (1/2)', rd.count === 1 && rd.of === 2);
     } else {
       raters[0].send({ action: 'rate', value: 2 });
-      raters[1].send({ action: 'rate', value: 1 }); // complet → avance tout seul
+      raters[1].send({ action: 'rate', value: 1 });
+      await a.nextType('rated'); const rd2 = await a.nextType('rated');
+      await b.nextType('rated'); await b.nextType('rated');
+      await c.nextType('rated'); await c.nextType('rated');
+      if (i === 0) check('avancement des votes diffusé (2/2)', rd2.count === 2 && rd2.of === 2);
     }
+
+    await sleep(300);
+    check(`prise ${i + 1} : tous les votes reçus mais PAS d'avance automatique`, a.queue.length === 0);
+
+    a.send({ action: 'next' }); // le host passe à la suivante
     const sc = await a.nextType('scores');
     await b.nextType('scores'); await c.nextType('scores');
     const expected = i === 1 ? 2 : 3;
