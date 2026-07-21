@@ -1,0 +1,17 @@
+{
+  "name": "imitation-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serveur arbitre WebSocket du jeu d'imitation - machine à états + relais audio en RAM",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
