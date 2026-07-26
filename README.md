@@ -41,6 +41,25 @@ PORT=8124 node test.js
 | `RECORD_GRACE_MS` | 2500    | grâce d'upload après la clôture du host           |
 | `ROUNDS`          | 3       | rounds par partie                                 |
 
+## Catalogue vidéos : chargement et diagnostic
+
+Le catalogue est rechargé depuis `VIDEOS_URL` **au démarrage, toutes les 10 min,
+et au lancement de chaque partie** (`onStart`) - donc éditer `videos.json` sur le
+site suffit, sans redéployer ni redémarrer le serveur.
+
+`GET /videos` (ex. `https://ton-serveur.onrender.com/videos`) renvoie ce que le
+serveur connaît **à l'instant T** :
+
+```json
+{ "count": 40, "source": "https://…/videos.json", "lastError": null, "videos": [ … ] }
+```
+
+- `count` faible (1-3) + `lastError` non nul → le chargement distant a échoué,
+  le serveur est sur sa liste de secours. Lis `lastError` (HTTP 404, JSON
+  invalide, réseau…) et corrige le `videos.json` du site.
+- `lastError: null` avec le bon `count` → le catalogue est bon ; si une vidéo
+  ne joue pas, le souci est côté hébergeur (URL fausse, fichier absent, ou CORS).
+
 ## Protocole
 
 Texte (JSON) + frames binaires (les prises audio) sur le même socket :

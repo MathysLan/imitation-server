@@ -42,16 +42,33 @@ const VIDEOS_URL = process.env.VIDEOS_URL !== undefined
   ? process.env.VIDEOS_URL // '' = désactivé (tests)
   : 'https://mathyslan.github.io/games/imitation/videos/videos.json';
 
+// Bruyant exprès : sans logs, impossible de savoir pourquoi le catalogue ne se
+// met pas à jour. Chaque issue (HTTP KO, JSON invalide, réseau) laisse une trace.
+let lastVideosError = null; // exposé sur /videos pour diagnostiquer sans les logs Render
 async function refreshVideos() {
-  if (!VIDEOS_URL) return;
+  if (!VIDEOS_URL) { lastVideosError = 'VIDEOS_URL désactivée (liste de secours)'; return false; }
   try {
     const res = await fetch(VIDEOS_URL, { cache: 'no-store' });
-    const list = await res.json();
-    if (Array.isArray(list) && list.length && list.every((v) => v.id)) {
-      VIDEOS = list.map((v) => ({ id: String(v.id), url: v.url ? String(v.url) : null }));
-      console.log(`catalogue vidéos rechargé : ${VIDEOS.length} clip(s)`);
+    if (!res.ok) {
+      lastVideosError = `HTTP ${res.status} sur ${VIDEOS_URL}`;
+      console.warn('catalogue vidéos:', lastVideosError);
+      return false;
     }
-  } catch { /* réseau ou JSON cassé : on garde la dernière liste valide */ }
+    const list = await res.json();
+    if (!Array.isArray(list) || !list.length || !list.every((v) => v && v.id)) {
+      lastVideosError = 'JSON inattendu (attendu un tableau non vide de { id, url? })';
+      console.warn('catalogue vidéos:', lastVideosError);
+      return false;
+    }
+    VIDEOS = list.map((v) => ({ id: String(v.id), url: v.url ? String(v.url) : null }));
+    lastVideosError = null;
+    console.log(`catalogue vidéos: ${VIDEOS.length} clip(s) chargé(s) depuis ${VIDEOS_URL}`);
+    return true;
+  } catch (e) {
+    lastVideosError = `échec réseau/JSON: ${e.message}`;
+    console.warn('catalogue vidéos:', lastVideosError, '- liste de secours conservée');
+    return false;
+  }
 }
 refreshVideos();
 setInterval(refreshVideos, 10 * 60 * 1000).unref();
@@ -59,7 +76,13 @@ setInterval(refreshVideos, 10 * 60 * 1000).unref();
 const rooms = new Map(); // code → room
 let nextId = 1;
 
-const server = http.createServer((_req, res) => {
+// GET /videos → ce que le serveur connaît VRAIMENT, à l'instant T. À ouvrir dans
+// le navigateur pour diagnostiquer sans fouiller les logs Render.
+const server = http.createServer((req, res) => {
+  if (req.url === '/videos') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ count: VIDEOS.length, source: VIDEOS_URL || null, lastError: lastVideosError, videos: VIDEOS }, null, 2));
+  }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('imitation-server OK\n');
 });
@@ -84,7 +107,8 @@ function createRoom(code) {
     hostId: null,
     rounds: null,       // manches choisies par le host au lancement
     round: 0,
-    usedVideos: [],
+    usedVideos: [],     // clips déjà vus DANS CE LOBBY (survit d'une partie à l'autre)
+    lastVideoId: null,  // dernier clip joué : on évite de le rejouer juste après
     video: null,        // { id, url } du round en cours
     closing: false,     // grâce d'upload en cours après le 'next' du host
     takes: new Map(),   // id → { buf, mime } - RAM le temps du round, purgé après
@@ -153,18 +177,26 @@ function onReady(ws, ready) {
   if (p) { p.ready = !!ready; sendRoomState(room); }
 }
 
-function onStart(ws, msg) {
+async function onStart(ws, msg) {
   const room = rooms.get(ws.room);
   if (!room) return sendError(ws, 'aucune room');
   if (ws.id !== room.hostId) return sendError(ws, 'seul le host peut lancer');
   if (room.phase !== 'lobby') return sendError(ws, 'partie déjà lancée');
   if (room.players.size < CONFIG.MIN_PLAYERS) return sendError(ws, `il faut au moins ${CONFIG.MIN_PLAYERS} joueurs`);
 
+  // Catalogue frais pour CETTE partie : plus besoin d'attendre le cache 10 min
+  // ni de redémarrer Render après avoir édité videos.json.
+  await refreshVideos();
+  // re-vérif après l'await (un joueur a pu partir entre-temps)
+  if (room.phase !== 'lobby' || room.players.size < CONFIG.MIN_PLAYERS) return;
+
   // Config choisie par le host à l'écran de lancement (bornée côté serveur, évidemment).
   room.rounds = Math.min(10, Math.max(1, Math.trunc(+((msg && msg.rounds)) || CONFIG.ROUNDS)));
   for (const p of room.players.values()) { p.score = 0; p.ready = false; }
   room.round = 0;
-  room.usedVideos = [];
+  // On NE remet PAS `usedVideos` à zéro : tant qu'on reste dans le même lobby,
+  // relancer une partie ne doit pas refaire tomber les mêmes clips. Le cycle
+  // repart tout seul quand tout le catalogue est passé (cf. engine.pickVideo).
   nextRound(room);
 }
 
@@ -188,8 +220,13 @@ function nextRound(room) {
   if (room.round >= (room.rounds || CONFIG.ROUNDS)) return endGame(room);
   room.round++;
 
-  const video = engine.pickVideo(VIDEOS, room.usedVideos);
-  room.usedVideos.push(video.id);
+  const { video, used } = engine.pickVideo(VIDEOS, room.usedVideos, room.lastVideoId);
+  if (!video) {                                   // catalogue vide : on ne plante pas
+    roomBroadcast(room, { type: 'error', message: 'aucune vidéo dans le catalogue' });
+    room.phase = 'lobby'; sendRoomState(room); return;
+  }
+  room.usedVideos = used;
+  room.lastVideoId = video.id;
   room.video = video;
 
   room.phase = 'watching';

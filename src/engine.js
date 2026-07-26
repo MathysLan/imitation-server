@@ -1,10 +1,22 @@
 // Logique pure du jeu d'imitation : des entrées → des sorties, c'est tout.
 // Pas de socket, pas de timer, pas d'état global : tout est testable à sec.
 
-function pickVideo(videos, usedIds) {
-  let pool = videos.filter((v) => !usedIds.includes(v.id));
-  if (pool.length === 0) pool = videos; // tout a été vu : on repart du catalogue complet
-  return pool[Math.floor(Math.random() * pool.length)];
+// Tire une vidéo pas encore vue DANS CETTE ROOM. `usedIds` persiste d'une partie
+// à l'autre tant qu'on reste dans le même lobby : on ne retombe donc pas sur les
+// mêmes clips en relançant. Quand tout le catalogue est passé, on repart pour un
+// nouveau tour — en évitant de rejouer tout de suite le dernier clip vu.
+// Renvoie { video, used } : la nouvelle liste des vues, que le serveur stocke.
+function pickVideo(videos, usedIds = [], lastId = null) {
+  if (!videos || videos.length === 0) return { video: null, used: usedIds || [] };
+  let used = usedIds || [];
+  let pool = videos.filter((v) => !used.includes(v.id));
+  if (pool.length === 0) {                          // catalogue épuisé → on relance un cycle
+    used = [];
+    pool = videos.filter((v) => v.id !== lastId);   // pas deux fois de suite le même
+    if (pool.length === 0) pool = videos;           // cas d'un catalogue à une seule vidéo
+  }
+  const video = pool[Math.floor(Math.random() * pool.length)];
+  return { video, used: [...used, video.id] };
 }
 
 function shuffle(arr) {
