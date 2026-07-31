@@ -336,7 +336,10 @@ function onRate(ws, value) {
   if (!res.ok) return sendError(ws, res.error);
   room.current.ratings.set(ws.id, value);
   const eligible = room.players.size - (room.players.has(room.current.owner) ? 1 : 0);
-  roomBroadcast(room, { type: 'rated', count: room.current.ratings.size, of: eligible });
+  // on joint QUI a noté (et le propriétaire de la prise, qui ne vote pas) :
+  // le front peut ainsi nommer ceux qu'on attend au lieu d'un simple compteur
+  roomBroadcast(room, { type: 'rated', count: room.current.ratings.size, of: eligible,
+    ids: [...room.current.ratings.keys()], owner: room.current.owner });
 }
 
 // ---------------------------------------------------------------- départs
