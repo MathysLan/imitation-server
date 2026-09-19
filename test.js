@@ -32,7 +32,7 @@ function client() {
     queue,
     send: (o) => ws.send(JSON.stringify(o)),
     sendBin: (b) => ws.send(b),
-    open: () => new Promise((res) => ws.on('open', res)),
+    open: () => (ws.readyState === 1 ? Promise.resolve() : new Promise((r) => ws.once('open', r))),
     async nextType(type) { // consomme jusqu'au prochain message du type voulu
       for (;;) {
         const m = await next();
@@ -57,7 +57,10 @@ function client() {
   const rc = await c.nextType('room');
   const idC = rc.you;
   check('3 joueurs dans la room', rc.players.length === 3);
-  check('avatar transmis dans la room', rc.players.find((p) => p.id === idA).avatar === '🔥');
+  // L'avatar est maintenant un objet { kind, emoji, src? } (voir src/avatar.js) ;
+  // un emoji envoyé en chaîne (ancien client) ressort en { kind: 'emoji' }.
+  const avA = rc.players.find((p) => p.id === idA).avatar;
+  check('avatar transmis dans la room', avA.kind === 'emoji' && avA.emoji === '🔥' && !('src' in avA));
 
   // draine les états de room hérités des joins de B et C avant de tester « prêt »
   await a.nextType('room'); await a.nextType('room'); await b.nextType('room');

@@ -81,3 +81,32 @@ Texte (JSON) + frames binaires (les prises audio) sur le même socket :
 
 Garde-fous mémoire : `maxPayload` 2 Mo sur le socket, 1,5 Mo max par prise,
 purge des audios à chaque fin de round, à l'abandon et à la fermeture de room.
+
+## Avatar (photo de profil)
+
+Depuis le 2026-09-19, `avatar` dans le `join` est un objet, et c'est le même
+objet qui repart dans toutes les listes de joueurs (salon, scores, podium…) :
+
+```js
+{ kind: 'emoji', emoji: '🦊' }
+{ kind: 'image', emoji: '🦊', src: 'data:image/webp;base64,…' }   // la photo du profil
+```
+
+`src/avatar.js` le revalide (le client n'a aucune autorité) : data-URL **webp ou
+png** seulement, **≤ 12 Ko décodés**, base64 canonique, signature du fichier
+vérifiée (RIFF…WEBP / PNG). Refusé : SVG, tout autre type, image trop lourde,
+structure inattendue, `kind` inconnu — l'image est alors écartée et le joueur
+entre avec son emoji (défaut du jeu : 🙂). Seuls `kind`, `emoji` et `src`
+sont recopiés. L'image n'est ni décodée ni réencodée : gardée telle quelle.
+Un ancien client qui envoie une simple chaîne (un emoji) reste accepté.
+
+⚠️ `avatar.js` est le même fichier dans les six serveurs qui reçoivent une
+identité (imitation, demicercle, ban, precision, passeur, qui-ment).
+
+Tests : `node test-avatar.js` (validation, avec de vraies images dans
+`test-fixtures/`) et le test WebSocket réel :
+
+```
+VIDEOS_URL= RECORD_GRACE_MS=200 ROUNDS=1 PORT=8124 node src/server.js &
+PORT=8124 node test-avatar-ws.js
+```

@@ -9,7 +9,8 @@
 // dernières prises arriver.
 //
 // Protocole texte (JSON) + frames binaires (les prises audio) :
-//   client  → { action:'join', name, code? }        sans code : crée la room (host)
+//   client  → { action:'join', name, code?, avatar? } sans code : crée la room (host)
+//             avatar = { kind:'emoji', emoji } | { kind:'image', emoji, src } — revalidé par src/avatar.js
 //   client  → { action:'start' }                    host uniquement, depuis le lobby
 //   client  → { action:'next' }                     host uniquement : phase suivante
 //   client  → { action:'audio-meta', mime, size }   puis UNE frame binaire (refaisable)
@@ -24,6 +25,7 @@
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const engine = require('./engine');
+const { cleanAvatar } = require('./avatar');
 
 const CONFIG = {
   RECORD_GRACE_MS: +process.env.RECORD_GRACE_MS || 2500, // grâce d'upload après le 'next' du host
@@ -161,7 +163,7 @@ function onJoin(ws, { name, code, avatar }) {
   room.players.set(ws.id, {
     id: ws.id,
     name: cleanName,
-    avatar: String(avatar || '🙂').slice(0, 4), // un emoji suffit comme photo de profil
+    avatar: cleanAvatar(avatar, '🙂'), // emoji, ou photo de profil revalidée (src/avatar.js)
     ready: false,
     ws,
     score: 0,
@@ -275,7 +277,7 @@ function playTake(room) {
   for (const p of room.players.values()) {
     sendJson(p.ws, {
       type: 'listen', idx: room.listenIdx, of: room.listenIdx + room.queue.length,
-      player: owner, name: author ? author.name : '?', avatar: author ? author.avatar : '🙂',
+      player: owner, name: author ? author.name : '?', avatar: author ? author.avatar : cleanAvatar(null, '🙂'),
       mime: take.mime,
     });
     p.ws.send(take.buf); // la frame binaire, telle que reçue

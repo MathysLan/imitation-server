@@ -36,7 +36,7 @@ function client() {
   const next = () => new Promise((r) => { if (q.length) r(q.shift()); else w.push(r); });
   return {
     ws, send: (o) => ws.send(JSON.stringify(o)),
-    open: () => new Promise((r) => ws.on('open', r)),
+    open: () => (ws.readyState === 1 ? Promise.resolve() : new Promise((r) => ws.once('open', r))),
     async nextType(t) { for (;;) { const m = await next(); if (m.type === t) return m; } },
   };
 }
