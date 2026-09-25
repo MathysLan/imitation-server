@@ -26,6 +26,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const engine = require('./engine');
 const { cleanAvatar } = require('./avatar');
+const presenceJoueurs = require('./presence');
 
 const CONFIG = {
   RECORD_GRACE_MS: +process.env.RECORD_GRACE_MS || 2500, // grâce d'upload après le 'next' du host
@@ -90,6 +91,9 @@ const server = http.createServer((req, res) => {
 });
 // maxPayload : le garde-fou RAM réel - une frame plus lourde ferme la connexion.
 const wss = new WebSocketServer({ server, maxPayload: 2 * 1024 * 1024 });
+// Présence applicative : un onglet gelé ne reste pas compté dans sa room (voir
+// presence.js). Le module ne fait que fermer le socket ; le départ habituel fait le reste.
+const presence = presenceJoueurs.attach(wss);
 
 // Codes lisibles : pas de 0/O ni 1/I.
 const CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -129,11 +133,12 @@ wss.on('connection', (ws) => {
     if (isBinary) return onAudio(ws, raw);
     let msg;
     try { msg = JSON.parse(raw); } catch { return sendError(ws, 'JSON invalide'); }
+    if (presence.consume(ws, msg)) return;   // { action: 'presence' } : jamais « action inconnue »
     if (msg.action === 'join') onJoin(ws, msg);
     else if (msg.action === 'ready') onReady(ws, msg.ready);
     else if (msg.action === 'start') onStart(ws, msg);
     else if (msg.action === 'next') onNext(ws);
-    else if (msg.action === 'audio-meta') onAudioMeta(ws, msg);
+    else if (msg.action === 'audio-meta') { presence.hold(ws); onAudioMeta(ws, msg); }   // sursis : la prise audio arrive derrière
     else if (msg.action === 'rate') onRate(ws, msg.value);
     else sendError(ws, 'action inconnue');
   });
